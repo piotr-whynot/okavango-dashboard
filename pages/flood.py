@@ -13,7 +13,7 @@ dash.register_page(__name__, path="/flood", name="Inundation")
 # ---------------------------------------------------------------------------
 
 def load_data():
-    ds1 = xr.open_dataset("/work/projects/okavango_delta_modis/data/MCD43A4/okavango/test_all_int8.nc")
+    ds1 = xr.open_dataset("./data/flood/inundation_modis_int8.nc")
     return ds1["inundation"].sortby("lat")
 
 

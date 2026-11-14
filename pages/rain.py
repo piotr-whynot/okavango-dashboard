@@ -59,8 +59,8 @@ monthabbr=np.array(["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct",
 
 
 def load_data():
-    data_day = pd.read_csv("/work/projects/okavango_rainfall/data/data_day.csv", index_col=0,parse_dates=True)
-    sites = pd.read_csv("/work/projects/okavango_rainfall/data/sites.csv", index_col=0)
+    data_day = pd.read_csv("./data/rainfall/data_day.csv", index_col=0,parse_dates=True)
+    sites = pd.read_csv("./data/rainfall/sites.csv", index_col=0)
     data_day.columns.name="siteID"
     return data_day,sites
 
