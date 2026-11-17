@@ -1,10 +1,14 @@
 import dash
+import os
 import dash_bootstrap_components as dbc
+import dash_mantine_components as dmc
 from dash import html, dcc, callback, Output,Input
 from dash import get_relative_path
 
+PREFIX = os.environ.get("DASH_PREFIX", "/") 
+
 app = dash.Dash(__name__, 
-                requests_pathname_prefix="/monitoring/okavango/",
+                requests_pathname_prefix=PREFIX,
                 routes_pathname_prefix="/",
                 use_pages=True, 
                 external_stylesheets=[dbc.themes.FLATLY])
@@ -23,11 +27,15 @@ navbar = dbc.NavbarSimple(
     dark=True,
 )
 
-app.layout = html.Div([
-    navbar,
-    dcc.Location(id="url", refresh=False),
-    dash.page_container,   # renders the active page here
-])
+# MantineProvider is required by dash_mantine_components (date pickers) and has to wrap the whole app
+app.layout = dmc.MantineProvider(
+    html.Div([
+        navbar,
+        dcc.Location(id="url", refresh=False),
+        dash.page_container,   # renders the active page here
+    ]),
+    forceColorScheme="light",   # keep Mantine light, matching the Flatly theme
+)
 
 
 if __name__ == "__main__":

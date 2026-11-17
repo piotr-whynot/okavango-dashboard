@@ -4,6 +4,7 @@ from dash_bootstrap_templates import load_figure_template
 from dash import ctx
 import dash_bootstrap_components as dbc
 import dash_ag_grid as dag
+import dash_mantine_components as dmc
 
 import plotly.graph_objects as go
 import pandas as pd
@@ -39,6 +40,7 @@ ASPECT = (MAP_Y+MAP_MB+MAP_MT+10) / MAP_X
 
 #initialization - None picks up last date and a random station
 init_time=pd.to_datetime("2026-01-28")
+init_basetime="year"
 #init_time=None
 init_siteID="XAKANARE001"
 #init_siteID=None
@@ -49,7 +51,7 @@ init_year_sort=[False]
 init_onemon_sort=[False]
 init_onemon_select=["Dec"]
 init_accum_select=[]
-init_basetime_select="year"
+init_basetime_select=init_basetime
 
 monthabbr=np.array(["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"])
 
@@ -65,22 +67,51 @@ def load_data():
     return data_day,sites
 
 
-rain,sites = load_data()
+rain_dly,sites = load_data()
 
 #making sure data do not extend beyond yesterday
 yesterday=(datetime.datetime.today()-pd.offsets.Day(1)).normalize()
 
-rain=rain[rain.index<=yesterday]
+rain_dly=rain_dly[rain_dly.index<=yesterday]
+time_values_dly = pd.to_datetime(rain_dly.index.values)
+nans_dly=np.isnan(rain_dly)
+meanrain_dly = rain_dly.mean(axis=1)
 
+
+rain=rain_dly.copy()
 time_values = pd.to_datetime(rain.index.values)
+nans=np.isnan(rain)
+meanrain = rain.mean(axis=1)
+
 
 if init_time is None:
-    init_time=time_values[-1]
+    init_time=time_values_dly[-1]
 
 
-# Pre-compute mean time series
-meanrain = rain.mean(axis=1)
  
+
+
+def get_data_for_basetime(basetime):
+    global rain, nans, meanrain, time_values
+    print("getting data for basetime",basetime)
+    if basetime=="day":
+        rain=rain_dly.copy()
+        nans=nans_dly.copy()
+        meanrain=meanrain_dly.copy()
+    if basetime=="month":
+        rain=rain_dly.resample("MS").sum()
+        nans=np.isnan(rain_dly).resample("MS").sum()
+        meanrain=meanrain_dly.resample("MS").sum()
+    if basetime=="year":
+        rain=rain_dly.resample("YS-OCT").sum()
+        nans=np.isnan(rain_dly).resample("YS-OCT").sum()
+        meanrain=meanrain_dly.resample("YS-OCT").sum()
+
+
+    time_values = pd.to_datetime(rain.index.values)
+    #print("time values rain",time_values)
+    #print("time values nans",nans.index.values)
+    #print("time values meanrain",meanrain.index.values)
 
 
 
@@ -95,31 +126,47 @@ def make_marker_map(sel_time,sel_site, basetime, gauge_set):
     # get values for selected time step
 
     # merging data array with sites array
+
+
+    df_t = rain.T[[sel_time]].merge(sites, on="siteID")
+    df_nans = nans.T[[sel_time]].merge(sites, on="siteID")
+    sel_time=basetime_date(sel_time, basetime)
+
+    print("marker map time", rain.index.values[0:5])
+
     if basetime=="year":
-        sel_time=pd.to_datetime(sel_time).replace(day=1, month=10)
-        df_t = rain.resample("YS-OCT").sum()
-        print(df_t.index, sel_time)
-        df_t=df_t.T[[sel_time]].merge(sites, on="siteID")
         size_scale = 100  # max marker size in pixels
         vmax = 1000
-        vmin = 30
+        vmin = 6
+        daycount=365
     if basetime=="month":
-        sel_time=pd.to_datetime(sel_time).replace(day=1)
-        df_t = rain.resample("MS").sum().T[[sel_time]].merge(sites, on="siteID")
         size_scale = 100  # max marker size in pixels
         vmax = 200
         vmin = 6
+        daycount=28
     elif basetime=="day":
-        df_t = rain.T[[sel_time]].merge(sites, on="siteID")
         size_scale = 100  # max marker size in pixels
         vmax = 100
         vmin = 6
+        daycount=1
+
+    print(basetime, vmin,vmax,size_scale)
 
     df_t.rename(columns={df_t.columns[0]:"value"}, inplace=True)
+    df_nans.rename(columns={df_nans.columns[0]:"value"}, inplace=True)
+
     #selecting only stations with data, i.e. no nans
+    valid=df_nans["value"]==0
+    partial=df_nans["value"]<daycount
+    nodata=df_nans["value"]>=daycount
+
+    # replacing values that are nans with nans
+    df_t.loc[nodata,"value"]=np.nan
+
     if "reporting-only" in gauge_set:
-        sel=~np.isnan(df_t["value"])
-        df_t=df_t[sel]
+
+        #showing only valid
+        df_t=df_t[~nodata]
 
     
 
@@ -180,18 +227,22 @@ def make_marker_map(sel_time,sel_site, basetime, gauge_set):
     return fig
 
 
-
+def make_time_string(sel_time,basetime):
+    if basetime=="day":
+        time_str="on "+pd.to_datetime(sel_time).strftime("%d %b %Y"),
+    if basetime=="month":
+        time_str="in "+pd.to_datetime(sel_time).strftime("%b %Y"),
+    if basetime=="year":
+        fyear=pd.to_datetime(sel_time).strftime("%Y")
+        lyear=int(fyear)+1
+        time_str=f"in Oct {fyear} - Sep {lyear}"
+    return time_str
 
 
 def make_time_selector(sel_time,basetime):
-    if basetime=="day":
-        data=meanrain.copy()
-    if basetime=="month":
-        data=meanrain.resample("MS").sum()
-        sel_time=pd.to_datetime(sel_time).replace(day=1)
-    if basetime=="year":
-        data=meanrain.resample("YS").sum()
-        sel_time=pd.to_datetime(sel_time).replace(day=1,month=1)
+
+    data=meanrain.copy()
+    sel_time=basetime_date(sel_time, basetime)
 
     fig = go.Figure(go.Scatter(
         x=data.index,
@@ -217,17 +268,89 @@ def make_time_selector(sel_time,basetime):
     return fig 
 
 
+def basetime_date(sel_time, basetime):
+    t = pd.to_datetime(sel_time)
+    if basetime == "year":
+        t = t.replace(month=10, day=1)
+    elif basetime == "month":
+        t = t.replace(day=1)
+    return t
 
 
-def make_data_table(sel_time, gauge_set):
+def picker_value(sel_time, basetime):
+    """datetime -> string held by the date picker: 'YYYY-MM-DD', where month and year
+    basetimes use the first day of the period. Always the same format the picker emits,
+    so writing it back to the picker does not make the picker 'change'."""
+    t = pd.Timestamp(sel_time)
+    t = min(max(t, pd.Timestamp(time_values.min())), pd.Timestamp(time_values.max()))
+    if basetime == "year":
+        t = t.replace(month=10, day=1)
+    elif basetime == "month":
+        t = t.replace(day=1)
+    return str(t.date())
 
+
+def dbg(name, *info):  # DEBUG
+    print(f"[{datetime.datetime.now():%H:%M:%S.%f}] {name} <- {list(ctx.triggered_prop_ids)}", *info, flush=True)  # DEBUG
+
+
+def picker_time(value):
+    """string from the date picker -> Timestamp"""
+    return pd.Timestamp(value)
+
+
+def make_date_picker(sel_time, basetime):
+    """The one date picker (always id='date-picker', property 'value'); its type
+    follows basetime: day -> calendar, month -> month picker, year -> year picker."""
+    kwargs = dict(
+        id="date-picker",
+        value=picker_value(sel_time, basetime),
+        minDate=str(pd.Timestamp(time_values.min()).date()),
+        maxDate=str(pd.Timestamp(time_values.max()).date()),
+        clearable=False,
+        size="sm",
+    )
+    if basetime == "year":
+        return dmc.YearPickerInput(valueFormat="YYYY", w=110, **kwargs)
+    if basetime == "month":
+        return dmc.MonthPickerInput(valueFormat="MMM YYYY", w=140, **kwargs)
+    return dmc.DatePickerInput(valueFormat="YYYY-MM-DD", w=140, **kwargs)
+
+
+
+
+def make_data_table(sel_time, basetime, gauge_set):
+
+    if basetime=="year":
+        daycount=365
+    if basetime=="month":
+        daycount=28
+    elif basetime=="day":
+        daycount=1
+
+
+    # merging data array with sites array
     df_t = rain.T[[sel_time]].merge(sites, on="siteID")
-    df_t.rename(columns={df_t.columns[0]:"value"}, inplace=True)
+    df_nans = nans.T[[sel_time]].merge(sites, on="siteID")
+    sel_time=basetime_date(sel_time, basetime)
 
+    df_t.rename(columns={df_t.columns[0]:"value"}, inplace=True)
+    df_nans.rename(columns={df_nans.columns[0]:"value"}, inplace=True)
+
+
+    #selecting only stations with data, i.e. no nans
+    valid=df_nans["value"]==0
+    partial=df_nans["value"]<daycount
+    nodata=df_nans["value"]>=daycount
+
+    # replacing values that are nans with nans
+    df_t.loc[nodata,"value"]=np.nan
 
     if "reporting-only" in gauge_set:
-        sel=~np.isnan(df_t["value"])
-        df_t=df_t[sel]
+
+        #showing only valid
+        df_t=df_t[partial]
+
 
     df_t=df_t.reset_index()
     df_t=df_t[["value","siteID","Location"]]
@@ -325,7 +448,7 @@ def make_gauge_info(siteID):
 
 def make_gauge_ts_day(siteID):
 
-    ts = rain[siteID].sort_index()
+    ts = rain_dly[siteID].sort_index()
 
     fig = go.Figure(go.Scatter(
         x=pd.to_datetime(ts.index).tolist(),
@@ -392,7 +515,7 @@ def make_gauge_accum_day(df,alllabels):
 
 def get_accum_data(siteID):
 
-    ts = rain[siteID].sort_index()
+    ts = rain_dly[siteID].sort_index()
 
     start_month,start_day=10,1
 
@@ -414,16 +537,16 @@ def get_accum_data(siteID):
 
 def make_gauge_ts_mon(siteID):
 
-    ts = rain[siteID].sort_index()
+    ts = rain_dly[siteID].sort_index()
 
-    validmon=np.invert(np.isnan(ts)).resample("ME").sum()
+    validmon=np.invert(np.isnan(ts)).resample("MS").sum()
     ndaysmon=pd.Series(validmon.index.daysinmonth.values, index=validmon.index)
 
     percvalid=np.round((validmon/ndaysmon*100).astype(int),0)
     validdata=percvalid>98
 
     colors = ["steelblue" if flag else "lightblue" for flag in validdata]
-    ts=ts.resample("ME").sum()
+    ts=ts.resample("MS").sum()
 
     fig = go.Figure(go.Bar(
         x=pd.to_datetime(ts.index).tolist(),
@@ -479,7 +602,7 @@ def make_gauge_ts_onemon(siteID, onemon_sort,onemon_select):
 
     selmon=np.where(monthabbr==onemon_select)[0][0]+1
 
-    ts = rain[siteID].sort_index()
+    ts = rain_dly[siteID].sort_index()
 
     #monthly
     validmon=np.invert(np.isnan(ts)).resample("ME").sum()
@@ -585,23 +708,23 @@ def make_gauge_ts_onemon(siteID, onemon_sort,onemon_select):
 
 def make_gauge_ts_year(siteID, year_sort):
 
-    ts = rain[siteID].sort_index()
+    ts = rain_dly[siteID].sort_index()
     #monthly
-    validmon=np.invert(np.isnan(ts)).resample("ME").sum()
+    validmon=np.invert(np.isnan(ts)).resample("MS").sum()
     ndaysmon=pd.Series(validmon.index.daysinmonth.values, index=validmon.index)
 
     validmon[validmon.index.month.isin([4,5,6,7,8,9,10])]=0
     ndaysmon[ndaysmon.index.month.isin([4,5,6,7,8,9,10])]=0
 
-    validyear=validmon.resample("YE-JUL").sum()
-    ndaysyear=ndaysmon.resample("YE-JUL").sum()
+    validyear=validmon.resample("YS-OCT").sum()
+    ndaysyear=ndaysmon.resample("YS-OCT").sum()
 
     percvalid=np.round((validyear/ndaysyear*100).astype(int),0)
     validdata=percvalid>98
     
-    ts=ts.resample("YE-JUL").sum()
+    ts=ts.resample("YS-OCT").sum()
     colors = np.array(["steelblue" if flag else "lightblue" for flag in validdata])
-    labels=np.array([f"{x.year-1}-{x.year}" for x in ts.index])
+    labels=np.array([f"{x.year}-{x.year+1}" for x in ts.index])
 
     if True in year_sort:
         sortidx=np.argsort(ts).values[::-1]
@@ -777,7 +900,7 @@ layout = dbc.Container([
                 dbc.CardBody([
                     dbc.Row([
                         dbc.Col(
-                            html.H5(["Rainfall on ",html.Span(init_time.strftime("%d %b %Y"), id="map-title-time")]),
+                            html.H5(["Rainfall ",html.Span(init_time.strftime("%d %b %Y"), id="map-title-time")]),
                         ),
                     ]),
                     dbc.Row([
@@ -823,23 +946,18 @@ layout = dbc.Container([
                         dbc.Row([
                             
                             dbc.Col(
-                                html.H5("Select date"),
+                                html.H5("Average across all reporting stations"),
                             ),
                             dbc.Col(dbc.Button("◀", id="prev-date", size="sm", color="secondary"), width="auto"),
                             dbc.Col(
-                                dcc.DatePickerSingle(
-                                    id="date-picker",
-                                    min_date_allowed=pd.Timestamp(time_values.min()).date(),
-                                    max_date_allowed=pd.Timestamp(time_values.max()).date(),
-                                    date=pd.Timestamp(init_time).date(),
-                                    display_format="YYYY-MM-DD",
-                                ),
+                                id="date-picker-container",
+                                children=make_date_picker(init_time, init_basetime),
                                 width="auto",
                             ),
                             dbc.Col(dbc.Button("▶", id="next-date", size="sm", color="secondary"), width="auto"),
                         ], justify="center", align="center", className="g-2"),
 
-                        html.P("or click on the figure to select date", className="text-muted text-left small"),
+                        html.P("Select date or click on the figure to select date", className="text-muted text-left small"),
                         html.Div( 
                             id="gauge-info-container",
                             children=dcc.Graph(
@@ -855,13 +973,13 @@ layout = dbc.Container([
             # data table
                 dbc.Card([
                     dbc.CardBody([
-                        html.H5(["Rainfall on ",html.Span(init_time.strftime("%d %b %Y"), id="table-title-time")]),
+                        html.H5(["Rainfall ",html.Span(init_time.strftime("%d %b %Y"), id="table-title-time")]),
 
                         html.P("Click on row to show data for selected gauge. Click on header to sort table by column values.", className="text-muted small"),
 
                         html.Div(
                             id="data-table",
-                            children=make_data_table(init_time,init_gauge_set),
+                            children=make_data_table(init_time, init_basetime, init_gauge_set),
                         ),
                         make_collapsible_text("data-table",2),
                     ]),
@@ -1093,22 +1211,34 @@ layout = dbc.Container([
     Output("map-title-time", "children"),
     Output("table-title-time", "children"),
     Output("data-table", "children"),
-    Output("date-picker", "date"),
-    Output("basetime", "data"),
+    Output("date-picker", "value"),
     Input("selected-time", "data"),
     Input("gauge-set", "value"),
-    Input("basetime-select", "value"),
+    Input("basetime", "data"),
     State("selected-site", "data"),
 )
 def update_figures(selected_time, gauge_set,basetime,selected_site):
+    dbg("update_figures", selected_time, basetime)  # DEBUG
+    selected_time=basetime_date(selected_time, basetime)
     return (
-        make_marker_map(pd.to_datetime(selected_time),selected_site,basetime,gauge_set), 
-        pd.to_datetime(selected_time).strftime("%d %b %Y"),
-        pd.to_datetime(selected_time).strftime("%d %b %Y"),
-        make_data_table(selected_time, gauge_set),
-        selected_time,
-        basetime,
+        make_marker_map(selected_time,selected_site,basetime,gauge_set), 
+        make_time_string(selected_time, basetime),
+        make_time_string(selected_time, basetime),
+        make_data_table(selected_time, basetime, gauge_set),
+        picker_value(selected_time, basetime),
     )
+
+
+# basetime store: driven by the basetime selector only, so that selecting a time or a site
+# does not redraw the time selector chart
+@callback(
+    Output("basetime", "data"),
+    Input("basetime-select", "value"),
+)
+def set_basetime(basetime):
+    dbg("set_basetime", basetime)  # DEBUG
+    get_data_for_basetime(basetime)
+    return basetime
 
 
 # plotting time selector
@@ -1116,10 +1246,12 @@ def update_figures(selected_time, gauge_set,basetime,selected_site):
     Output("time-selector-chart", "figure"),
     Input("init-trigger", "data"),
     Input("basetime", "data"),
+    State("selected-time", "data"),
 )
-def update_figure(trigger,basetime):
+def update_figure(trigger,basetime,selected_time):
+    dbg("update_figure(time selector)", basetime)  # DEBUG
     return (
-        make_time_selector(init_time,basetime)
+        make_time_selector(selected_time,basetime)
     )
 
 
@@ -1132,6 +1264,7 @@ def update_figure(trigger,basetime):
     prevent_initial_call=True,
 )
 def on_ts_click(click_data):
+    dbg("on_ts_click")  # DEBUG
     if not click_data:
         return dash.no_update
 
@@ -1147,19 +1280,25 @@ def on_ts_click(click_data):
 #date picker - handles previous and next buttons
 @callback(
     Output("selected-time", "data", allow_duplicate=True),
-    Output("date-picker", "date", allow_duplicate=True),
-    Input("date-picker", "date"),
+    Output("date-picker", "value", allow_duplicate=True),
+    Input("date-picker", "value"),
     Input("prev-date", "n_clicks"),
     Input("next-date", "n_clicks"),
     State("selected-time", "data"),
+    State("basetime-select", "value"),
     prevent_initial_call=True,
 )
-def on_date_change(picked_date, prev_clicks, next_clicks, current_time):
+def on_date_change(picked_date, prev_clicks, next_clicks, current_time, basetime):
+    dbg("on_date_change", picked_date, current_time, basetime)  # DEBUG
 
     current = pd.Timestamp(current_time)
 
+    #print("picker time", time_values)
+
     if ctx.triggered_id == "date-picker":
-        nearest = min(time_values, key=lambda t: abs(pd.Timestamp(t) - pd.Timestamp(picked_date)))
+        if not picked_date:
+            return dash.no_update, dash.no_update
+        nearest = min(time_values, key=lambda t: abs(pd.Timestamp(t) - picker_time(picked_date)))
     elif ctx.triggered_id == "prev-date":
         earlier = [t for t in time_values if pd.Timestamp(t) < current]
         nearest = max(earlier) if earlier else current
@@ -1169,7 +1308,19 @@ def on_date_change(picked_date, prev_clicks, next_clicks, current_time):
     else:
         nearest = current
 
-    return pd.to_datetime(nearest), pd.Timestamp(nearest).date()
+    return pd.to_datetime(nearest), picker_value(nearest, basetime)
+
+
+# replacing the date picker (same id, different type) when basetime changes
+@callback(
+    Output("date-picker-container", "children"),
+    Input("basetime-select", "value"),
+    State("selected-time", "data"),
+    prevent_initial_call=True,
+)
+def swap_date_picker(basetime, selected_time):
+    dbg("swap_date_picker", basetime, selected_time)  # DEBUG
+    return make_date_picker(selected_time, basetime)
 
 
 # plotting ts-onemon
@@ -1230,15 +1381,18 @@ def update_year_options(siteID):
     Output("gauge-info-container", "children"),
     Output("gauge-ts-day-title", "children"),
     Output("gauge-ts-mon-title", "children"),
+    Output("gauge-ts-onemon-title", "children"),
     Output("gauge-info-title", "children"),
     Input("selected-site", "data"),
     #prevent_initial_call=True,
 )
 def update_figures(siteID):
+    dbg("update_figures(site)", siteID)  # DEBUG
     return (
         make_gauge_ts_day(siteID),
         make_gauge_ts_mon(siteID),
         make_gauge_info(siteID),
+        siteID,
         siteID,
         siteID,
         siteID,
@@ -1253,6 +1407,7 @@ def update_figures(siteID):
     prevent_initial_call=True,
 )
 def on_gauge_click(click_data):
+    dbg("on_gauge_click")  # DEBUG
     if not click_data:
         return dash.no_update
 
@@ -1271,6 +1426,7 @@ def on_gauge_click(click_data):
     prevent_initial_call=True,
 )
 def on_table_row_click(selected_rows):
+    dbg("on_table_row_click", selected_rows[0]["siteID"] if selected_rows else None)  # DEBUG
     if not selected_rows:
         return dash.no_update
     return selected_rows[0]["siteID"]
@@ -1286,6 +1442,7 @@ def on_table_row_click(selected_rows):
     prevent_initial_call=True,
 )
 def sync_grid_selection(selected_site, row_data):
+    dbg("sync_grid_selection", selected_site)  # DEBUG
     if not selected_site or not row_data:
         return dash.no_update
     matching = [row for row in row_data if row["siteID"] == selected_site]
@@ -1352,18 +1509,20 @@ dash.clientside_callback(
 
 
 
-#updating time selector chart when clicked - client side - data do not change, just styling changes, i.e. line is added.
+#moving the marker line on the time selector chart when selected-time changes - client side - data do not change, just the line is moved.
 dash.clientside_callback(
     """
-    function(clickData) {
-        if (!clickData || !clickData.points || !clickData.points.length) {
-            return window.dash_clientside.no_update;
-        }
-        const x = clickData.points[0].x;
-        const graphDiv = document.getElementById('time-selector-chart').getElementsByClassName('js-plotly-plot')[0];
-        
-        if (!graphDiv) return window.dash_clientside.no_update;
-        
+    function(selectedTime, basetime) {
+        if (!selectedTime) return window.dash_clientside.no_update;
+        const container = document.getElementById('time-selector-chart');
+        const graphDiv = container && container.getElementsByClassName('js-plotly-plot')[0];
+        if (!graphDiv || !graphDiv.layout) return window.dash_clientside.no_update;
+
+        // selected-time is 'YYYY-MM-DD...'; snap to the start of the period shown on the chart
+        let x = String(selectedTime).slice(0, 10);
+        if (basetime === 'year') x = x.slice(0, 4) + '-10-01';
+        else if (basetime === 'month') x = x.slice(0, 7) + '-01';
+
         Plotly.relayout(graphDiv, {
             shapes: [{
                 type: 'line',
@@ -1377,7 +1536,8 @@ dash.clientside_callback(
     }
     """,
     Output("time-selector-chart", "id"),   # dummy output, not actually used
-    Input("time-selector-chart", "clickData"),
+    Input("selected-time", "data"),        # chart click, date picker, prev/next - anything that changes selected-time
+    State("basetime-select", "value"),
 )
 
 # highlighting lines in accumulated plot
