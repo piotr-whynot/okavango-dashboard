@@ -41,9 +41,9 @@ ASPECT = (MAP_Y+MAP_MB+MAP_MT+10) / MAP_X
 
 
 #initialization - None picks up last date and a random station
-init_time=pd.to_datetime("2026-01-28")
-init_basetime="year"
-#init_time=None
+#init_time=pd.to_datetime("2026-01-28")
+init_basetime="day"
+init_time=None
 init_siteID="XAKANARE001"
 #init_siteID=None
 
