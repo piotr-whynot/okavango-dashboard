@@ -1,0 +1,1 @@
+Data table shows all values reported on the selected day. Note that empty value means that there was no rainfall reported by given gauge on that day. It might have been 0mm, i.e. no rain, and the observer simply did not bother to report. But it might have been raining, but gauge was broken, or the observer was away, or for some reason they did not report the actual measurement.

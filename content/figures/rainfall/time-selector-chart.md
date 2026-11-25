@@ -1,0 +1,1 @@
+Note: This graph is only vaguely informative as the number of stations changes in time, so rainfall values for 2003 are calculated based on one or two gauges while those in 2025 based on about 40. As a result - one cannot really compare 2003 with 2025. This graph is used here to show when it rains and when it doesn't to allow for selecting date for further inspection.

@@ -1,0 +1,1 @@
+Monthly data are calculated from daily measurements. In this we assume that if there is no reported values for some days in the month it means that it was not raining on those days, i.e. that missing data is equivalent to the value of 0. We do, however, flag months for which data are missing.

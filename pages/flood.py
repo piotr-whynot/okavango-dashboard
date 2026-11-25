@@ -119,7 +119,7 @@ def make_map_figure(sel_time):
 
     fig.update_layout(
         title=dict(
-            text=f"Okavango Delta inundation map for {pd.to_datetime(sel_time).strftime('%d %b %Y')}",
+            text=f"Okavango Delta inundation map for {pd.to_datetime(sel_time).strftime('%d %b %Y')}<br>click anywhere on map to see time series",
             x=0.5,
             xanchor="center",
             y=0.95,          # position from bottom (0-1)
@@ -238,15 +238,6 @@ def make_point_ts_figure(lat, lon):
 layout = dbc.Container([
 
     # Header
-    dbc.Row(
-        dbc.Col(
-            html.Img(
-                src="./assets/CSAG_web-logo.png",
-                width="150px",
-            ),
-        )
-    ),
-
     dbc.Row(dbc.Col(
         html.H2("Okavango Delta Inundation", className="text-center"),
     )),

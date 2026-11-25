@@ -6,6 +6,8 @@ import dash_bootstrap_components as dbc
 import dash_ag_grid as dag
 import dash_mantine_components as dmc
 
+from info import make_collapsible_text as _collapsible   # shared show/hide text (text in ./content)
+
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
@@ -75,6 +77,12 @@ yesterday=(datetime.datetime.today()-pd.offsets.Day(1)).normalize()
 rain_dly=rain_dly[rain_dly.index<=yesterday]
 time_values_dly = pd.to_datetime(rain_dly.index.values)
 nans_dly=np.isnan(rain_dly)
+
+#this should be a series
+n_days=rain_dly.copy()
+n_days[:]=1
+n_days=n_days.iloc[:,0]
+
 meanrain_dly = rain_dly.mean(axis=1)
 
 
@@ -92,22 +100,28 @@ if init_time is None:
 
 
 def get_data_for_basetime(basetime):
-    global rain, nans, meanrain, time_values
+    global rain, nans, meanrain, time_values,n_days
     print("getting data for basetime",basetime)
     if basetime=="day":
         rain=rain_dly.copy()
         nans=nans_dly.copy()
         meanrain=meanrain_dly.copy()
+        n_days = rain_dly.copy()
+        n_days[:]=1
+        n_days=n_days.iloc[:,0]
+
     if basetime=="month":
         rain=rain_dly.resample("MS").sum()
         nans=np.isnan(rain_dly).resample("MS").sum()
         meanrain=meanrain_dly.resample("MS").sum()
+        n_days = rain_dly.resample("MS").size()
     if basetime=="year":
         rain=rain_dly.resample("YS-OCT").sum()
         nans=np.isnan(rain_dly).resample("YS-OCT").sum()
         meanrain=meanrain_dly.resample("YS-OCT").sum()
+        n_days = rain_dly.resample("YS-OCT").size()
 
-
+    #print("ndays",n_days)
     time_values = pd.to_datetime(rain.index.values)
     #print("time values rain",time_values)
     #print("time values nans",nans.index.values)
@@ -130,9 +144,11 @@ def make_marker_map(sel_time,sel_site, basetime, gauge_set):
 
     df_t = rain.T[[sel_time]].merge(sites, on="siteID")
     df_nans = nans.T[[sel_time]].merge(sites, on="siteID")
+    ndays = n_days.T[[sel_time]].values[0]
+
     sel_time=basetime_date(sel_time, basetime)
 
-    print("marker map time", rain.index.values[0:5])
+    #print("marker map time", rain.index.values[0:5])
 
     if basetime=="year":
         size_scale = 100  # max marker size in pixels
@@ -150,30 +166,38 @@ def make_marker_map(sel_time,sel_site, basetime, gauge_set):
         vmin = 6
         daycount=1
 
-    print(basetime, vmin,vmax,size_scale)
 
     df_t.rename(columns={df_t.columns[0]:"value"}, inplace=True)
     df_nans.rename(columns={df_nans.columns[0]:"value"}, inplace=True)
 
     #selecting only stations with data, i.e. no nans
     valid=df_nans["value"]==0
-    partial=df_nans["value"]<daycount
-    nodata=df_nans["value"]>=daycount
+    partial=df_nans["value"]<ndays #partial and valid
+    nodata=df_nans["value"]>=ndays
 
     # replacing values that are nans with nans
     df_t.loc[nodata,"value"]=np.nan
 
     if "reporting-only" in gauge_set:
 
-        #showing only valid
-        df_t=df_t[~nodata]
+        #showing only valid or partial
+        df_t=df_t[partial]
+        df_nans=df_nans[partial]
+        nodata=nodata[partial]
+        valid=valid[partial]
+        partial=partial[partial]
 
-    
-
+   
     # scale marker size
     sizes = (df_t["value"] / vmax * size_scale).fillna(vmin).clip(lower=vmin)  # min size 3
 
-    colors = ["black" if np.isnan(s) else "steelblue" for s in df_t["value"]]
+    #colors = ["black" if np.isnan(s) else "steelblue" for s in df_t["value"]]
+
+    FLAG_COLORS = {False: "lightblue", True: "steelblue"}   # choose your colours
+    FLAG_LABELS = {False: "Some days missing", True: "All daily measurements"}   # legend text
+    NODATA_COLOR = "black"
+
+    colors = [NODATA_COLOR if n else FLAG_COLORS[f] for n,f in zip(nodata,valid)]
 
     fig = go.Figure()
 
@@ -205,8 +229,9 @@ def make_marker_map(sel_time,sel_site, basetime, gauge_set):
             df_t["Observer's Name"],
             df_t["Location"],
             df_t["value"],
+            df_nans["value"]
         ], axis=1),
-        hovertemplate="<b>%{text}</b><br>value: %{customdata[3]} mm<br>Location: %{customdata[2]}<br>Owner: %{customdata[1]}<extra></extra>",
+        hovertemplate="<b>%{customdata[0]}</b><br>value: %{customdata[3]} mm<br>Location: %{customdata[2]}<br>Owner: %{customdata[1]}<br>Missing days: %{customdata[4]}<extra></extra>",
     ))
 
     fig.update_layout(
@@ -239,18 +264,42 @@ def make_time_string(sel_time,basetime):
     return time_str
 
 
-def make_time_selector(sel_time,basetime):
 
-    data=meanrain.copy()
-    sel_time=basetime_date(sel_time, basetime)
+def make_time_selector(sel_time, basetime):
 
-    fig = go.Figure(go.Scatter(
-        x=data.index,
-        y=list(data.values.flatten()),
-        marker=dict(
-            line=dict(color="black",width=1)
-        )
+    if basetime=="year":
+        daycount=365
+    if basetime=="month":
+        daycount=28
+    elif basetime=="day":
+        daycount=1
+
+    data = meanrain.copy()
+    flag = n_days>=daycount
+    sel_time = basetime_date(sel_time, basetime)
+
+    x = data.index
+    y = data.values.flatten()
+
+    fig = go.Figure()
+
+    # connecting line, not in the legend
+    fig.add_trace(go.Scatter(
+        x=x, y=y, mode="lines",
+        line=dict(color="grey", width=1),
+        showlegend=False, hoverinfo="skip",
     ))
+
+    # one marker trace per value of the boolean -> one legend entry each
+    for value, label, colour in [
+        (True,  "full period",  "royalblue"),
+        (False, "period partially covered by data", "orange"),
+    ]:
+        mask = (flag == value).values
+        fig.add_trace(go.Scatter(
+            x=x[mask], y=y[mask], mode="markers", name=label,
+            marker=dict(color=colour, size=6, line=dict(color="black", width=1)),
+        ))
 
     fig.add_vline(
         x=str(pd.Timestamp(sel_time))[:10],
@@ -259,14 +308,13 @@ def make_time_selector(sel_time,basetime):
     fig.update_layout(
         yaxis_title="Rainfall (mm)",
         template=figtemplate,
-        height=200,
+        height=220,
         autosize=True,
-        legend=dict(orientation="h", x=0.5, y=-0.15, xanchor="center", yanchor="top"),
-        margin=dict(l=0, r=0, t=0, b=10),
+        legend=dict(orientation="h", x=1, y=1, xanchor="right", yanchor="bottom"),
+        margin=dict(l=0, r=0, t=25, b=10),
     )
 
-    return fig 
-
+    return fig
 
 def basetime_date(sel_time, basetime):
     t = pd.to_datetime(sel_time)
@@ -330,9 +378,13 @@ def make_data_table(sel_time, basetime, gauge_set):
 
 
     # merging data array with sites array
-    df_t = rain.T[[sel_time]].merge(sites, on="siteID")
+    df_t=np.round(rain.T[[sel_time]],2)
+    df_t =df_t.merge(sites, on="siteID")
     df_nans = nans.T[[sel_time]].merge(sites, on="siteID")
     sel_time=basetime_date(sel_time, basetime)
+
+    ndays = n_days.T[[sel_time]].values[0]
+
 
     df_t.rename(columns={df_t.columns[0]:"value"}, inplace=True)
     df_nans.rename(columns={df_nans.columns[0]:"value"}, inplace=True)
@@ -340,8 +392,8 @@ def make_data_table(sel_time, basetime, gauge_set):
 
     #selecting only stations with data, i.e. no nans
     valid=df_nans["value"]==0
-    partial=df_nans["value"]<daycount
-    nodata=df_nans["value"]>=daycount
+    partial=df_nans["value"]<ndays
+    nodata=df_nans["value"]==ndays
 
     # replacing values that are nans with nans
     df_t.loc[nodata,"value"]=np.nan
@@ -350,6 +402,7 @@ def make_data_table(sel_time, basetime, gauge_set):
 
         #showing only valid
         df_t=df_t[partial]
+
 
 
     df_t=df_t.reset_index()
@@ -838,42 +891,10 @@ def get_hy(ts, start_month=10, start_day=1):
 
    
 
-def make_collapsible_text(text_id, index):
-    text=text_dict[text_id]
-    return html.Div([
-        dbc.Collapse(
-            html.P(text, className="text-muted small"),
-            id={"type": "card-collapse", "index": index},
-            is_open=False,
-        ),
-        dbc.Button(
-            "Read about this figure/table...",
-            id={"type": "card-toggle", "index": index},
-            color="link",
-            size="sm",
-            className="p-0",
-        ),
-    ])
-
-
-
-text_dict={
-"time-selector-chart":"Note: This graph is only vaguely informative as the number of stations changes in time, so rainfall values for 2003 are calculated based on one or two gauges while those in 2025 based on about 40. As a result - one cannot really compare 2003 with 2025. This graph is used here to show when it rains and when it doesn't to allow for selecting date for further inspection.",
-
-"gauge-ts-mon":"Monthly data are calculated from daily measurements. In this we assume that if there is no reported values for some days in the month it means that it was not raining on those days, i.e. that missing data is equivalent to the value of 0. We do, however, flag months for which data are missing.",
-
-"gauge-accum-day":"Daily data for the selected gauge.",
-"gauge-ts-onemon":"Daily data for the selected gauge.",
-
-"gauge-ts-day":"Daily data for the selected gauge. Note that missing data are not explicitly shown.",
-
-"marker-map":"Map shows location of rain gauges and rainfall amounts for the selected day. Note that by default only gauges that have data for the selecte date are shown, but you can show location of all stations using the toggle. Some sites report data only when it rains. When it does not rain - they report nothing. When we receive no data for a given day, We do not know, unfortunately, whether this means that there was no rain, or perhaps that there was no measurement done on that day. It is possible that there was no rainfall over gagues with no data, but it is not 100% sure.",
-
-"data-table":"Data table shows all values reported on the selected day. Note that empty value means that there was no rainfall reported by given gauge on that day. It might have been 0mm, i.e. no rain, and the observer simply did not bother to report. But it might have been raining, but gauge was broken, or the observer was away, or for some reason they did not report the actual measurement.",
-
-"gauge-ts-year":"This chart illustrates total rainfall measured over a year. It uses a hydrological year that starts in October and finishes in September. Note that bars have two colours that signify the robustness of data. It is only natural that some measurements are missing. Observers might have not recorded data, or rain gauge was broken etc. Additionally, often, observers report data only when it rains, and do not report 0s when it does'nt. This creates a bit of a problem because if there is no data reported, we do not know if this is because there was no rain, or perhaps rain wasn't measured. In many cases we make an educated guess that missing data are simply 0s, but we cannot always do that. This way or nother - we count how many days have missing values and if there is more than 10% of such days (i.e. more than 36 days in a year), we flag the year's total as not-robust"
-}
-
+def make_collapsible_text(text_id, index=None):
+    """Show/hide description under a figure; text is in content/figures/rainfall/<text_id>.md.
+    (index is no longer needed but kept so the calls in the layout stay as they are)"""
+    return _collapsible(f"figures/rainfall/{text_id}")
 
 
 
@@ -886,8 +907,7 @@ layout = dbc.Container([
 
     # --- Page header ---
     dbc.Row([
-        dbc.Col(html.Img(src="./assets/CSAG_web-logo.png", height="25px"), width="auto"),
-        dbc.Col(html.H2("Okavango Delta Rainfall", className="text-center"), className="my-auto"),
+        dbc.Col(html.H2("Region's Rainfall", className="text-center"), className="my-auto"),
     ], align="center", className="py-1 border-bottom mb-2"),
 
 
@@ -990,6 +1010,12 @@ layout = dbc.Container([
 
     # closing first row
     ], className="g-5"),
+
+    dbc.Row([
+        dbc.Col(html.H2("Selected location's rainfall", className="text-center"), className="my-auto"),
+    ], align="center", className="py-1 border-bottom mb-2"),
+
+
 
 
     #figures for individual gauge row
@@ -1449,22 +1475,6 @@ def sync_grid_selection(selected_site, row_data):
     if not matching:
         return dash.no_update, dash.no_update
     return matching, {"rowPosition": "middle", "data": matching[0]}
-
-
-# toggling collapses
-@callback(
-    Output({"type": "card-collapse", "index": dash.ALL}, "is_open"),
-    Output({"type": "card-toggle", "index": dash.ALL}, "children"),
-    Input({"type": "card-toggle", "index": dash.ALL}, "n_clicks"),
-    State({"type": "card-collapse", "index": dash.ALL}, "is_open"),
-    prevent_initial_call=True,
-)
-def toggle_cards(n_clicks_list, is_open_list):
-    idx = ctx.triggered_id["index"]
-    new_states = is_open_list.copy()
-    new_states[idx] = not new_states[idx]
-    labels = ["Hide description" if s else "Read about this figure/table..." for s in new_states]
-    return new_states, labels
 
 
 # ---------------------------------------------------------------------------
