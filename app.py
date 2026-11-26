@@ -9,8 +9,8 @@ from dash import get_relative_path
 
 from info import read_md, make_collapsible_text
 
-#PREFIX = os.environ.get("DASH_PREFIX", "/monitoring/okavango/")
-PREFIX = os.environ.get("DASH_PREFIX", "/")
+PREFIX = os.environ.get("DASH_PREFIX", "/monitoring/okavango/")
+#PREFIX = os.environ.get("DASH_PREFIX", "/")
 
 app = dash.Dash(__name__,
                 requests_pathname_prefix=PREFIX,
