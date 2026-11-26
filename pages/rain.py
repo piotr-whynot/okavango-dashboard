@@ -74,7 +74,16 @@ rain_dly,sites = load_data()
 #making sure data do not extend beyond yesterday
 yesterday=(datetime.datetime.today()-pd.offsets.Day(1)).normalize()
 
-rain_dly=rain_dly[rain_dly.index<=yesterday]
+#getting the most recent available date
+
+sel=~np.isnan(rain_dly).all(axis=1)
+lastdataday=rain_dly.index[sel][-1]
+
+firstdataday=rain_dly.index[sel][0]
+
+#rain_dly=rain_dly[rain_dly.index<=lastdataday]
+rain_dly=rain_dly[firstdataday:lastdataday]
+
 time_values_dly = pd.to_datetime(rain_dly.index.values)
 nans_dly=np.isnan(rain_dly)
 
@@ -456,6 +465,10 @@ def make_gauge_info(siteID):
     except:
         cont=True
 
+    print(info['URL'])
+    if np.isnan(info["URL"]):
+        info["URL"]="Not available"
+
     df_info = pd.DataFrame({
         "Property": ["Station ID", 
                     "Latitude", 
@@ -772,10 +785,21 @@ def make_gauge_ts_year(siteID, year_sort):
     validyear=validmon.resample("YS-OCT").sum()
     ndaysyear=ndaysmon.resample("YS-OCT").sum()
 
+    sel=ndaysyear>0
+
+    validyear=validyear[sel]
+    ndaysyear=ndaysyear[sel]
+
+    print("valid",validyear)
+    print("ndays",ndaysyear)
+
     percvalid=np.round((validyear/ndaysyear*100).astype(int),0)
     validdata=percvalid>98
     
     ts=ts.resample("YS-OCT").sum()
+
+    ts=ts[sel]
+
     colors = np.array(["steelblue" if flag else "lightblue" for flag in validdata])
     labels=np.array([f"{x.year}-{x.year+1}" for x in ts.index])
 
@@ -968,13 +992,15 @@ layout = dbc.Container([
                             dbc.Col(
                                 html.H5("Average across all reporting stations"),
                             ),
+                            dbc.Col(dbc.Button("⏮\ufe0e", id="first-date", size="sm", color="secondary"), width="auto"),
                             dbc.Col(dbc.Button("◀", id="prev-date", size="sm", color="secondary"), width="auto"),
                             dbc.Col(
                                 id="date-picker-container",
                                 children=make_date_picker(init_time, init_basetime),
                                 width="auto",
                             ),
-                            dbc.Col(dbc.Button("▶", id="next-date", size="sm", color="secondary"), width="auto"),
+                            dbc.Col(dbc.Button("▶\ufe0e", id="next-date", size="sm", color="secondary"), width="auto"),
+                            dbc.Col(dbc.Button("⏭\ufe0e", id="last-date", size="sm", color="secondary"), width="auto"),
                         ], justify="center", align="center", className="g-2"),
 
                         html.P("Select date or click on the figure to select date", className="text-muted text-left small"),
@@ -1308,13 +1334,15 @@ def on_ts_click(click_data):
     Output("selected-time", "data", allow_duplicate=True),
     Output("date-picker", "value", allow_duplicate=True),
     Input("date-picker", "value"),
+    Input("first-date", "n_clicks"),
     Input("prev-date", "n_clicks"),
     Input("next-date", "n_clicks"),
+    Input("last-date", "n_clicks"),
     State("selected-time", "data"),
     State("basetime-select", "value"),
     prevent_initial_call=True,
 )
-def on_date_change(picked_date, prev_clicks, next_clicks, current_time, basetime):
+def on_date_change(picked_date, first_click, prev_clicks, next_clicks, last_click, current_time, basetime):
     dbg("on_date_change", picked_date, current_time, basetime)  # DEBUG
 
     current = pd.Timestamp(current_time)
@@ -1325,12 +1353,16 @@ def on_date_change(picked_date, prev_clicks, next_clicks, current_time, basetime
         if not picked_date:
             return dash.no_update, dash.no_update
         nearest = min(time_values, key=lambda t: abs(pd.Timestamp(t) - picker_time(picked_date)))
+    elif ctx.triggered_id == "first-date":
+        nearest = time_values[0]
     elif ctx.triggered_id == "prev-date":
         earlier = [t for t in time_values if pd.Timestamp(t) < current]
         nearest = max(earlier) if earlier else current
     elif ctx.triggered_id == "next-date":
         later = [t for t in time_values if pd.Timestamp(t) > current]
         nearest = min(later) if later else current
+    elif ctx.triggered_id == "last-date":
+        nearest = time_values[-1]
     else:
         nearest = current
 

@@ -9,7 +9,8 @@ from dash import get_relative_path
 
 from info import read_md, make_collapsible_text
 
-PREFIX = os.environ.get("DASH_PREFIX", "/monitoring/okavango/")
+#PREFIX = os.environ.get("DASH_PREFIX", "/monitoring/okavango/")
+PREFIX = os.environ.get("DASH_PREFIX", "/")
 
 app = dash.Dash(__name__,
                 requests_pathname_prefix=PREFIX,
@@ -97,10 +98,10 @@ navbar = dbc.Navbar(
 # "About this page" bar under the navbar; filled in by a callback when the page changes
 # page_info = dbc.Container(id="page-info-bar", fluid=True, className="py-1")
 
+#html.Span(f"© {datetime.now().year} CSAG", className="text-muted small me-3"),
 footer = html.Footer(
     dbc.Container(
         [
-            html.Span(f"© {datetime.now().year} CSAG", className="text-muted small me-3"),
             *[dbc.Button(DOCS[n], id=doc_trigger_id(n), n_clicks=0,
                          color="link", size="sm", className="text-muted")
               for n in FOOTER_DOCS],

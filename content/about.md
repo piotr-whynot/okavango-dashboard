@@ -8,18 +8,24 @@ We have two resources here:
 This web page is intended to facilitate collection and sharing of daily rainfall records in the Okavango area. Also - it's a way to keep these data for posterity.
 
 **Who is doing this?**
-Data shown here are collected by individuals living in the Okavango region and operating rain gauges in their backyard. Measuring and sharing data, and operating of this website and database is done by volunteers. Nobody gets paid for doing this.
+Data shown here are collected by individuals living in the Okavango region and operating rain gauges in their backyard. Measuring and sharing data, and operating of this website and database is done by volunteers. Nobody gets paid for doing this. The page/dashboard and data processing system are developed by Piotr in his spare time.
 
 Note that the web page is free to use. It contains no ads, no cookies, no trackers. Amazing, no? There are some conditions, though, if you want to use these date. Read about them in the **Terms of Use** section at the bottom of the page.
 
-**Why Okavango and CSAG?**
+**What is the link between Okavango and CSAG?**
 This website is hosted by [CSAG UCT](https://www.csag.uct.ac.za). Why? Because we can. Also - Piotr works here.
 
-**What about sustainability of this thing?**
+**What about sustainability of this website?**
 One day we will link the data collected here to a "long-term" data storage at the [Okavango Research Institute, University of Botswana] (https://monitoringdata.ub.bw/)
 
-**We see figures, but where is the actual data?**
+**You see figures, but where is the actual data?**
 [here] (https://docs.google.com/spreadsheets/d/15O_Pcyn-knboqjqlwYPbb9sT0kS2B9EK7KK57iu-noU/edit?gid=2126509450#gid=2126509450)
+
+**Acknowledgements**
+- First - to all volunteers/individuals who contribute their measurements to the system. This page would not be possible without you.
+- Second - to Hennie and Co. for setting up and running a fantastic Whatsapp and Facebook group "Maun Flood Arrival" that instigated the developent of this dashboard.
+- Last, but not least - to Beata for supporting and encouraging Piotr to keep going with this thing. Again, without you - it would not have happened.
+ 
 
 ### MODIS derived inundation maps ###
 
