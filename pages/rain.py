@@ -13,6 +13,9 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 import datetime
+import os
+import threading
+from types import SimpleNamespace
 
 # ---------------------------------------------------------------------------
 # First things first
@@ -43,7 +46,7 @@ ASPECT = (MAP_Y+MAP_MB+MAP_MT+10) / MAP_X
 #initialization - None picks up last date and a random station
 #init_time=pd.to_datetime("2026-01-28")
 init_basetime="day"
-init_time=None
+INIT_TIME=None   # None picks up the last available date at page load
 init_siteID="XAKANARE001"
 #init_siteID=None
 
@@ -60,83 +63,79 @@ monthabbr=np.array(["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct",
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
+#
+# Data are cached per process and re-read whenever either CSV file changes on disk
+# (checked with one stat() call per file whenever get_data() is called), so new data
+# show up without restarting the service. Nothing here is a mutable global that
+# callbacks overwrite: the aggregation level (day/month/year) is an argument, so users
+# (and gunicorn workers) cannot interfere with each other.
+
+DAY_PATH = "./data/rainfall/data_day.csv"
+SITES_PATH = "./data/rainfall/sites.csv"
+
+_lock = threading.Lock()
+_cache = {"key": None, "base": None}
 
 
-def load_data():
-    data_day = pd.read_csv("./data/rainfall/data_day.csv", index_col=0,parse_dates=True)
-    sites = pd.read_csv("./data/rainfall/sites.csv", index_col=0)
-    data_day.columns.name="siteID"
-    return data_day,sites
+def _build_base():
+    """Read the files and do the preprocessing that does not depend on basetime."""
+    rain_dly = pd.read_csv(DAY_PATH, index_col=0, parse_dates=True)
+    sites = pd.read_csv(SITES_PATH, index_col=0)
+    rain_dly.columns.name = "siteID"
+
+    # trimming to the period with data
+    sel = ~np.isnan(rain_dly).all(axis=1)
+    firstdataday = rain_dly.index[sel][0]
+    lastdataday = rain_dly.index[sel][-1]
+    rain_dly = rain_dly[firstdataday:lastdataday]
+
+    return SimpleNamespace(
+        rain_dly=rain_dly,
+        sites=sites,
+        nans_dly=np.isnan(rain_dly),
+        meanrain_dly=rain_dly.mean(axis=1),
+        views={},          # filled on demand, one entry per basetime
+    )
 
 
-rain_dly,sites = load_data()
+def _build_view(base, basetime):
+    """Data aggregated to the requested basetime ("day", "month" or "year")."""
+    d, nans_d, mean_d = base.rain_dly, base.nans_dly, base.meanrain_dly
 
-#making sure data do not extend beyond yesterday
-yesterday=(datetime.datetime.today()-pd.offsets.Day(1)).normalize()
+    if basetime == "day":
+        rain, nans, meanrain = d, nans_d, mean_d
+        n_days = pd.Series(1, index=d.index)
+    else:
+        rule = "MS" if basetime == "month" else "YS-OCT"
+        rain = d.resample(rule).sum()
+        nans = nans_d.resample(rule).sum()
+        meanrain = mean_d.resample(rule).sum()
+        n_days = d.resample(rule).size()
 
-#getting the most recent available date
-
-sel=~np.isnan(rain_dly).all(axis=1)
-lastdataday=rain_dly.index[sel][-1]
-
-firstdataday=rain_dly.index[sel][0]
-
-#rain_dly=rain_dly[rain_dly.index<=lastdataday]
-rain_dly=rain_dly[firstdataday:lastdataday]
-
-time_values_dly = pd.to_datetime(rain_dly.index.values)
-nans_dly=np.isnan(rain_dly)
-
-#this should be a series
-n_days=rain_dly.copy()
-n_days[:]=1
-n_days=n_days.iloc[:,0]
-
-meanrain_dly = rain_dly.mean(axis=1)
-
-
-rain=rain_dly.copy()
-time_values = pd.to_datetime(rain.index.values)
-nans=np.isnan(rain)
-meanrain = rain.mean(axis=1)
+    return SimpleNamespace(
+        rain=rain,
+        nans=nans,
+        meanrain=meanrain,
+        n_days=n_days,
+        time_values=pd.to_datetime(rain.index.values),
+        rain_dly=base.rain_dly,     # daily data, whatever the basetime
+        sites=base.sites,
+    )
 
 
-if init_time is None:
-    init_time=time_values_dly[-1]
-
-
- 
-
-
-def get_data_for_basetime(basetime):
-    global rain, nans, meanrain, time_values,n_days
-    print("getting data for basetime",basetime)
-    if basetime=="day":
-        rain=rain_dly.copy()
-        nans=nans_dly.copy()
-        meanrain=meanrain_dly.copy()
-        n_days = rain_dly.copy()
-        n_days[:]=1
-        n_days=n_days.iloc[:,0]
-
-    if basetime=="month":
-        rain=rain_dly.resample("MS").sum()
-        nans=np.isnan(rain_dly).resample("MS").sum()
-        meanrain=meanrain_dly.resample("MS").sum()
-        n_days = rain_dly.resample("MS").size()
-    if basetime=="year":
-        rain=rain_dly.resample("YS-OCT").sum()
-        nans=np.isnan(rain_dly).resample("YS-OCT").sum()
-        meanrain=meanrain_dly.resample("YS-OCT").sum()
-        n_days = rain_dly.resample("YS-OCT").size()
-
-    #print("ndays",n_days)
-    time_values = pd.to_datetime(rain.index.values)
-    #print("time values rain",time_values)
-    #print("time values nans",nans.index.values)
-    #print("time values meanrain",meanrain.index.values)
-
-
+def get_data(basetime="day"):
+    """Returns an object with .rain, .nans, .meanrain, .n_days, .time_values (at the given
+    basetime) and .rain_dly, .sites. Treat the contents as read-only: they are shared
+    between requests - use .copy() before modifying anything."""
+    key = (os.path.getmtime(DAY_PATH), os.path.getmtime(SITES_PATH))
+    with _lock:
+        if key != _cache["key"]:            # files changed (or first call): rebuild
+            _cache["base"] = _build_base()
+            _cache["key"] = key
+        base = _cache["base"]
+        if basetime not in base.views:
+            base.views[basetime] = _build_view(base, basetime)
+        return base.views[basetime]
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +150,10 @@ def make_marker_map(sel_time,sel_site, basetime, gauge_set):
     # merging data array with sites array
 
 
-    df_t = rain.T[[sel_time]].merge(sites, on="siteID")
-    df_nans = nans.T[[sel_time]].merge(sites, on="siteID")
-    ndays = n_days.T[[sel_time]].values[0]
+    D = get_data(basetime)
+    df_t = D.rain.T[[sel_time]].merge(D.sites, on="siteID")
+    df_nans = D.nans.T[[sel_time]].merge(D.sites, on="siteID")
+    ndays = D.n_days.T[[sel_time]].values[0]
 
     sel_time=basetime_date(sel_time, basetime)
 
@@ -283,8 +283,9 @@ def make_time_selector(sel_time, basetime):
     elif basetime=="day":
         daycount=1
 
-    data = meanrain.copy()
-    flag = n_days>=daycount
+    D = get_data(basetime)
+    data = D.meanrain.copy()
+    flag = D.n_days>=daycount
     sel_time = basetime_date(sel_time, basetime)
 
     x = data.index
@@ -339,6 +340,7 @@ def picker_value(sel_time, basetime):
     basetimes use the first day of the period. Always the same format the picker emits,
     so writing it back to the picker does not make the picker 'change'."""
     t = pd.Timestamp(sel_time)
+    time_values = get_data(basetime).time_values
     t = min(max(t, pd.Timestamp(time_values.min())), pd.Timestamp(time_values.max()))
     if basetime == "year":
         t = t.replace(month=10, day=1)
@@ -359,6 +361,7 @@ def picker_time(value):
 def make_date_picker(sel_time, basetime):
     """The one date picker (always id='date-picker', property 'value'); its type
     follows basetime: day -> calendar, month -> month picker, year -> year picker."""
+    time_values = get_data(basetime).time_values
     kwargs = dict(
         id="date-picker",
         value=picker_value(sel_time, basetime),
@@ -387,12 +390,13 @@ def make_data_table(sel_time, basetime, gauge_set):
 
 
     # merging data array with sites array
-    df_t=np.round(rain.T[[sel_time]],2)
-    df_t =df_t.merge(sites, on="siteID")
-    df_nans = nans.T[[sel_time]].merge(sites, on="siteID")
+    D = get_data(basetime)
+    df_t=np.round(D.rain.T[[sel_time]],2)
+    df_t =df_t.merge(D.sites, on="siteID")
+    df_nans = D.nans.T[[sel_time]].merge(D.sites, on="siteID")
     sel_time=basetime_date(sel_time, basetime)
 
-    ndays = n_days.T[[sel_time]].values[0]
+    ndays = D.n_days.T[[sel_time]].values[0]
 
 
     df_t.rename(columns={df_t.columns[0]:"value"}, inplace=True)
@@ -444,7 +448,8 @@ def make_data_table(sel_time, basetime, gauge_set):
 
 
 def make_gauge_info(siteID):
-    ts = rain[siteID].sort_index()
+    D = get_data("day")
+    ts = D.rain_dly[siteID].sort_index()
     sel=~np.isnan(ts)
     ts=ts[sel]
     tsmax=np.max(ts)
@@ -456,7 +461,7 @@ def make_gauge_info(siteID):
     firstdate=pd.to_datetime(ts.index[0]).strftime("%d %b %Y")
     lastdate=pd.to_datetime(ts.index[-1]).strftime("%d %b %Y")
 
-    info = sites.loc[siteID]
+    info = D.sites.loc[siteID].copy()
     obstime=info['Observation time']
     try:
         obstime=float(obstime)
@@ -513,7 +518,7 @@ def make_gauge_info(siteID):
 
 def make_gauge_ts_day(siteID):
 
-    ts = rain_dly[siteID].sort_index()
+    ts = get_data("day").rain_dly[siteID].sort_index()
 
     fig = go.Figure(go.Scatter(
         x=pd.to_datetime(ts.index).tolist(),
@@ -580,7 +585,7 @@ def make_gauge_accum_day(df,alllabels):
 
 def get_accum_data(siteID):
 
-    ts = rain_dly[siteID].sort_index()
+    ts = get_data("day").rain_dly[siteID].sort_index()
 
     start_month,start_day=10,1
 
@@ -602,7 +607,7 @@ def get_accum_data(siteID):
 
 def make_gauge_ts_mon(siteID):
 
-    ts = rain_dly[siteID].sort_index()
+    ts = get_data("day").rain_dly[siteID].sort_index()
 
     validmon=np.invert(np.isnan(ts)).resample("MS").sum()
     ndaysmon=pd.Series(validmon.index.daysinmonth.values, index=validmon.index)
@@ -667,7 +672,7 @@ def make_gauge_ts_onemon(siteID, onemon_sort,onemon_select):
 
     selmon=np.where(monthabbr==onemon_select)[0][0]+1
 
-    ts = rain_dly[siteID].sort_index()
+    ts = get_data("day").rain_dly[siteID].sort_index()
 
     #monthly
     validmon=np.invert(np.isnan(ts)).resample("ME").sum()
@@ -773,7 +778,7 @@ def make_gauge_ts_onemon(siteID, onemon_sort,onemon_select):
 
 def make_gauge_ts_year(siteID, year_sort):
 
-    ts = rain_dly[siteID].sort_index()
+    ts = get_data("day").rain_dly[siteID].sort_index()
     #monthly
     validmon=np.invert(np.isnan(ts)).resample("MS").sum()
     ndaysmon=pd.Series(validmon.index.daysinmonth.values, index=validmon.index)
@@ -940,7 +945,7 @@ layout = dbc.Container([
                 dbc.CardBody([
                     dbc.Row([
                         dbc.Col(
-                            html.H5(["Rainfall ",html.Span(init_time.strftime("%d %b %Y"), id="map-title-time")]),
+                            html.H5(["Rainfall ",html.Span("", id="map-title-time")]),
                         ),
                     ]),
                     dbc.Row([
@@ -992,7 +997,9 @@ layout = dbc.Container([
                             dbc.Col(dbc.Button("◀", id="prev-date", size="sm", color="secondary"), width="auto"),
                             dbc.Col(
                                 id="date-picker-container",
-                                children=make_date_picker(init_time, init_basetime),
+                                # placeholder with no data in it - the real picker (with bounds
+                                # from the current data) is put here by init_page
+                                children=dmc.DatePickerInput(id="date-picker", valueFormat="YYYY-MM-DD", w=140, clearable=False, size="sm"),
                                 width="auto",
                             ),
                             dbc.Col(dbc.Button("▶\ufe0e", id="next-date", size="sm", color="secondary"), width="auto"),
@@ -1015,13 +1022,12 @@ layout = dbc.Container([
             # data table
                 dbc.Card([
                     dbc.CardBody([
-                        html.H5(["Rainfall ",html.Span(init_time.strftime("%d %b %Y"), id="table-title-time")]),
+                        html.H5(["Rainfall ",html.Span("", id="table-title-time")]),
 
                         html.P("Click on row to show data for selected gauge. Click on header to sort table by column values.", className="text-muted small"),
 
                         html.Div(
-                            id="data-table",
-                            children=make_data_table(init_time, init_basetime, init_gauge_set),
+                            id="data-table",   # filled by update_figures
                         ),
                         make_collapsible_text("data-table",2),
                     ]),
@@ -1228,7 +1234,7 @@ layout = dbc.Container([
 
 
     # Store selected time in browser
-    dcc.Store(id="selected-time", data=str(pd.Timestamp(init_time))),
+    dcc.Store(id="selected-time"),   # set by init_page
 
     # Store selected site
     dcc.Store(id="selected-site", data=init_siteID),
@@ -1238,7 +1244,9 @@ layout = dbc.Container([
     dcc.Store(id="dummy-store", data=""),
 
     #init trigger
-    dcc.Store(id="init-trigger", data=True)
+    dcc.Store(id="init-trigger", data=True),
+
+    dcc.Store(id="init-ready"),   # set by init_page once selected-time and the date picker exist
 
 ], fluid=True, style={"minWidth": "360px","maxWidth": "1800px"})
 
@@ -1251,6 +1259,21 @@ layout = dbc.Container([
 # ---------------------------------------------------------------------------
 
 
+
+
+# page initialisation: runs on every page load, so the starting date and the date picker bounds
+# always reflect the current data
+@callback(
+    Output("selected-time", "data"),
+    Output("date-picker-container", "children"),
+    Output("init-ready", "data"),
+    Input("init-trigger", "data"),
+)
+def init_page(_):
+    dbg("init_page")  # DEBUG
+    D = get_data("day")
+    t = INIT_TIME if INIT_TIME is not None else D.time_values[-1]
+    return str(pd.Timestamp(t)), make_date_picker(t, init_basetime), True
 
 
 # change map when selected-time changes
@@ -1267,6 +1290,8 @@ layout = dbc.Container([
 )
 def update_figures(selected_time, gauge_set,basetime,selected_site):
     dbg("update_figures", selected_time, basetime)  # DEBUG
+    if not selected_time:       # init_page has not set it yet
+        raise dash.exceptions.PreventUpdate
     selected_time=basetime_date(selected_time, basetime)
     return (
         make_marker_map(selected_time,selected_site,basetime,gauge_set), 
@@ -1285,19 +1310,20 @@ def update_figures(selected_time, gauge_set,basetime,selected_site):
 )
 def set_basetime(basetime):
     dbg("set_basetime", basetime)  # DEBUG
-    get_data_for_basetime(basetime)
     return basetime
 
 
 # plotting time selector
 @callback(
     Output("time-selector-chart", "figure"),
-    Input("init-trigger", "data"),
+    Input("init-ready", "data"),
     Input("basetime", "data"),
     State("selected-time", "data"),
 )
 def update_figure(trigger,basetime,selected_time):
     dbg("update_figure(time selector)", basetime)  # DEBUG
+    if not selected_time:       # init_page has not set it yet
+        raise dash.exceptions.PreventUpdate
     return (
         make_time_selector(selected_time,basetime)
     )
@@ -1309,10 +1335,12 @@ def update_figure(trigger,basetime,selected_time):
 @callback(
     Output("selected-time", "data", allow_duplicate=True),
     Input("time-selector-chart", "clickData"),
+    State("basetime", "data"),
     prevent_initial_call=True,
 )
-def on_ts_click(click_data):
+def on_ts_click(click_data, basetime):
     dbg("on_ts_click")  # DEBUG
+    time_values = get_data(basetime).time_values
     if not click_data:
         return dash.no_update
 
@@ -1340,6 +1368,7 @@ def on_ts_click(click_data):
 )
 def on_date_change(picked_date, first_click, prev_clicks, next_clicks, last_click, current_time, basetime):
     dbg("on_date_change", picked_date, current_time, basetime)  # DEBUG
+    time_values = get_data(basetime).time_values
 
     current = pd.Timestamp(current_time)
 
@@ -1367,7 +1396,7 @@ def on_date_change(picked_date, first_click, prev_clicks, next_clicks, last_clic
 
 # replacing the date picker (same id, different type) when basetime changes
 @callback(
-    Output("date-picker-container", "children"),
+    Output("date-picker-container", "children", allow_duplicate=True),
     Input("basetime-select", "value"),
     State("selected-time", "data"),
     prevent_initial_call=True,
