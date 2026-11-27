@@ -465,7 +465,6 @@ def make_gauge_info(siteID):
     except:
         cont=True
 
-    print(info['URL'])
     if np.isnan(info["URL"]):
         info["URL"]="Not available"
 
@@ -789,9 +788,6 @@ def make_gauge_ts_year(siteID, year_sort):
 
     validyear=validyear[sel]
     ndaysyear=ndaysyear[sel]
-
-    print("valid",validyear)
-    print("ndays",ndaysyear)
 
     percvalid=np.round((validyear/ndaysyear*100).astype(int),0)
     validdata=percvalid>98

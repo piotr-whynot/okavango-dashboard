@@ -9,14 +9,15 @@ from dash import get_relative_path
 
 from info import read_md, make_collapsible_text
 
-PREFIX = os.environ.get("DASH_PREFIX", "/monitoring/okavango/")
-#PREFIX = os.environ.get("DASH_PREFIX", "/")
+PREFIX = os.environ.get("FW_URL_PREFIX", "/")
 
 app = dash.Dash(__name__,
                 requests_pathname_prefix=PREFIX,
                 routes_pathname_prefix="/",
                 use_pages=True,
                 external_stylesheets=[dbc.themes.FLATLY])
+
+server=app.server
 
 app.config.suppress_callback_exceptions = True
 
@@ -191,4 +192,4 @@ def toggle_navbar(n_clicks, is_open):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=False)
