@@ -5,75 +5,99 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 import xarray as xr
+import os
+import threading
+from types import SimpleNamespace
 
 dash.register_page(__name__, path="/flood", name="Inundation")
 
 # ---------------------------------------------------------------------------
-# Data loading — runs once at startup
+# Data loading
 # ---------------------------------------------------------------------------
+#
+# The file is opened lazily (nothing big is held in memory) and the products that are
+# needed on every page load - the time series and the frequency map - are computed in
+# blocks of time steps. Maps and pixel time series are read from the file on demand.
+# The result is cached per process and rebuilt when the file's modification time changes,
+# so a new file shows up without restarting the service.
 
-def load_data():
-    ds1 = xr.open_dataset("./data/flood/flood_MCD453A4_okavango_merged_int8.nc")
-    return ds1["inundation"].sortby("lat")
-
-
-def derive_products(da1):
-    # -99 = cloud, 0 = dry, 1 = wet
-    dacloud = (da1 == 0).astype(np.int8)
-    daflood = (da1 == 1).astype(np.int8)
-
-    tscloud = dacloud.sum(["lat", "lon"]) / 4
-    tsflood  = daflood.sum(["lat", "lon"]) / 4
-
-    tsflood[tscloud > 1000] = np.nan
-
-    tsfloodbad = daflood.sum(["lat", "lon"]) / 4
-    tsfloodbad[tscloud <= 1000] = np.nan
-
-    return daflood, dacloud, tsflood, tscloud, tsfloodbad
-
-
-da1 = load_data()
-daflood, dacloud, tsflood, tscloud, tsfloodbad = derive_products(da1)
-
-time_values = daflood["time"].values
-
-
-lat_range = float(da1["lat"].max() - da1["lat"].min())
-lon_range = float(da1["lon"].max() - da1["lon"].min())
-
-nt,ny,nx=da1.shape
+NC_PATH = "./data/flood/flood_MCD453A4_okavango_merged_int8.nc"
+BLOCK = 256          # number of time steps processed at a time (ideally a multiple of the file's time chunk)
 
 MAP_MT=60
 MAP_MB=60
 
-#ASPECT = lat_range / lon_range
-ASPECT = (ny+MAP_MB+MAP_MT+10) / nx
+_lock = threading.Lock()
+_cache = {"key": None, "data": None}
 
 
-# Pre-compute static frequency map
-freq = daflood.mean("time") * 100
-freq = np.round(freq.where(freq >= 0),0)
+def _build():
+    # -99 = cloud, 0 = dry, 1 = wet
+    # mask_and_scale=False keeps the raw int8 values (no conversion to float)
+    ds = xr.open_dataset(NC_PATH, mask_and_scale=False)
+    da1 = ds["inundation"].sortby("lat")
+    nt, ny, nx = da1.shape
+
+    nflood = np.zeros(nt)
+    ncloud = np.zeros(nt)
+    wet = np.zeros((ny, nx), dtype=np.int32)
+
+    for i in range(0, nt, BLOCK):
+        blk = da1.isel(time=slice(i, i + BLOCK)).values
+        isflood = blk == 1
+        nflood[i:i + BLOCK] = isflood.sum(axis=(1, 2)) / 4
+        ncloud[i:i + BLOCK] = (blk == 0).sum(axis=(1, 2)) / 4
+        wet += isflood.sum(axis=0, dtype=np.int32)
+
+    time = da1["time"].values
+    tsraw = xr.DataArray(nflood, coords={"time": time}, dims="time")
+    tscloud = xr.DataArray(ncloud, coords={"time": time}, dims="time")
+
+    # frequency of inundation, in %
+    freq = xr.DataArray(
+        np.round(100.0 * wet / nt, 0),
+        coords={"lat": da1["lat"].values, "lon": da1["lon"].values},
+        dims=("lat", "lon"),
+    )
+
+    return SimpleNamespace(
+        ds=ds,                                  # keeps the file open for the on-demand reads
+        da1=da1,                                # lazy, raw values
+        time_values=time,
+        tsflood=tsraw.where(tscloud <= 1000),   # inundated area, images with little cloud
+        tsfloodbad=tsraw.where(tscloud > 1000), # inundated area in images with a lot of cloud
+        freq=freq,
+        aspect=(ny + MAP_MB + MAP_MT + 10) / nx,
+    )
 
 
-#daflood=daflood.where(freq>0.01)
+def get_data():
+    """Returns the cached data, rebuilding it first if the file has changed. Read-only."""
+    key = os.path.getmtime(NC_PATH)
+    with _lock:
+        if key != _cache["key"]:
+            _cache["data"] = _build()
+            _cache["key"] = key
+        return _cache["data"]
+
 
 # ---------------------------------------------------------------------------
 # Figure builders
 # ---------------------------------------------------------------------------
 
 def make_ts_figure(sel_time):
+    D = get_data()
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=tsflood.time.data,
-        y=list(tsflood.data.flatten()),
+        x=D.tsflood.time.data,
+        y=list(D.tsflood.data.flatten()),
         mode="lines",
         line=dict(color="grey", width=2),
         name="inundated area",
     ))
     fig.add_trace(go.Scatter(
-        x=tsfloodbad.time.data,
-        y=list(tsfloodbad.data),
+        x=D.tsfloodbad.time.data,
+        y=list(D.tsfloodbad.data),
         mode="lines",
         line=dict(color="lightgrey", width=2),
         name="inundated area in images with cloud",
@@ -97,7 +121,8 @@ def make_ts_figure(sel_time):
 
 
 def make_map_figure(sel_time):
-    slice_1 = daflood.sel(time=sel_time)
+    D = get_data()
+    slice_1 = (D.da1.sel(time=sel_time) == 1).astype(np.int8)
     slice_1 = slice_1.where(slice_1 >= 0)
     fig = go.Figure(go.Heatmap(
         z=slice_1.values,
@@ -130,7 +155,7 @@ def make_map_figure(sel_time):
         margin=dict(l=0, r=0, t=MAP_MT, b=MAP_MB),
         xaxis=dict(visible=True),
         yaxis=dict(visible=True),
-        meta={"aspect_ratio": ASPECT}
+        meta={"aspect_ratio": D.aspect}
     )
 
     fig.update_xaxes(
@@ -156,10 +181,12 @@ def make_map_figure(sel_time):
 
 
 def make_freq_figure():
+    D = get_data()
+    y0, y1 = pd.to_datetime(D.time_values[[0, -1]]).year
     fig = go.Figure(go.Heatmap(
-        z=freq.values,
-        x=freq["lon"].values,
-        y=freq["lat"].values,
+        z=D.freq.values,
+        x=D.freq["lon"].values,
+        y=D.freq["lat"].values,
         colorscale="Blues",
         zmin=0, zmax=100,
         colorbar=dict(
@@ -175,7 +202,7 @@ def make_freq_figure():
 
     fig.update_layout(
         title=dict(
-            text=f"Frequency of inundation during 2000-2026 period",
+            text=f"Frequency of inundation during {y0}-{y1} period",
             x=0.5,
             xanchor="center",
             y=0.95,          # position from bottom (0-1)
@@ -186,7 +213,7 @@ def make_freq_figure():
         margin=dict(l=0, r=0, t=MAP_MT, b=MAP_MB),
         xaxis=dict(visible=True),
         yaxis=dict(visible=True),
-        meta={"aspect_ratio": ASPECT}
+        meta={"aspect_ratio": D.aspect}
     )
 
     fig.update_xaxes(
@@ -212,7 +239,8 @@ def make_freq_figure():
 
 
 def make_point_ts_figure(lat, lon):
-    ts_point = daflood.sel(lat=lat, lon=lon, method="nearest")
+    D = get_data()
+    ts_point = (D.da1.sel(lat=lat, lon=lon, method="nearest") == 1).astype(np.int8)
     x=pd.to_datetime(ts_point.time.values).tolist();
 
     fig = go.Figure(go.Scatter(
@@ -235,64 +263,67 @@ def make_point_ts_figure(lat, lon):
 
 #app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
-layout = dbc.Container([
+def layout():
+    # rebuilt on every page load, so the initial date and figures reflect the current data
+    t = get_data().time_values[-1]
+    return dbc.Container([
 
-    # Header
-    dbc.Row(dbc.Col(
-        html.H2("Okavango Delta Inundation", className="text-center"),
-    )),
-
-
-    # Time series
-    dbc.Row(
-        dbc.Col(
-            dcc.Graph(
-                id="ts-chart",
-                figure=make_ts_figure(time_values[-1]),
-                config={"responsive": True},
-            ),
-            width=True,
-        )
-    ),
+        # Header
+        dbc.Row(dbc.Col(
+            html.H2("Okavango Delta Inundation", className="text-center"),
+        )),
 
 
-    # Inundation map
-    dbc.Row(
-        dbc.Col(
-            dcc.Graph(
-                id="flood-map",
-                className="resizable",
-                figure=make_map_figure(time_values[-1]),
-                config={"responsive": True},
+        # Time series
+        dbc.Row(
+            dbc.Col(
+                dcc.Graph(
+                    id="ts-chart",
+                    figure=make_ts_figure(t),
+                    config={"responsive": True},
+                ),
+                width=True,
             )
-        )
-    ),
-
-    # Point time series — hidden until map is clicked
-    dbc.Row(dbc.Col(
-        dcc.Graph(id="point-ts-chart", style={"display": "none"}),
-    )),
+        ),
 
 
-    # Frequency map
-    dbc.Row(
-        dbc.Col(
-            dcc.Graph(
-                id="freq-map",
-                className="resizable",
-                figure=make_freq_figure(),
-                config={"responsive": True},
-            ),
-            width=True,
-        )
-    ),
+        # Inundation map
+        dbc.Row(
+            dbc.Col(
+                dcc.Graph(
+                    id="flood-map",
+                    className="resizable",
+                    figure=make_map_figure(t),
+                    config={"responsive": True},
+                )
+            )
+        ),
+
+        # Point time series — hidden until map is clicked
+        dbc.Row(dbc.Col(
+            dcc.Graph(id="point-ts-chart", style={"display": "none"}),
+        )),
+
+
+        # Frequency map
+        dbc.Row(
+            dbc.Col(
+                dcc.Graph(
+                    id="freq-map",
+                    className="resizable",
+                    figure=make_freq_figure(),
+                    config={"responsive": True},
+                ),
+                width=True,
+            )
+        ),
 
 
 
-    # Store selected time in browser
-    dcc.Store(id="selected-time", data=str(pd.Timestamp(time_values[-1]))),
+        # Store selected time in browser
+        dcc.Store(id="selected-time", data=str(pd.Timestamp(t))),
 
-], fluid=True, style={"maxWidth": "700px", "minWidth": "360px"})
+    ], fluid=True, style={"maxWidth": "700px", "minWidth": "360px"})
 
 
 
@@ -310,6 +341,7 @@ layout = dbc.Container([
 )
 def on_ts_click(click_data, current_time):
     """Click on time series — move vline and update map."""
+    time_values = get_data().time_values
     if not click_data:
         return dash.no_update, dash.no_update, dash.no_update
 

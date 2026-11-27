@@ -470,7 +470,9 @@ def make_gauge_info(siteID):
     except:
         cont=True
 
-    if np.isnan(info["URL"]):
+    print(info["URL"])
+
+    if pd.isna(info["URL"]):
         info["URL"]="Not available"
 
     df_info = pd.DataFrame({
